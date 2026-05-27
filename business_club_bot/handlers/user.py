@@ -30,7 +30,8 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
         await message.answer(get_message("already_applied"))
         return
 
-    # Сначала проверяем, резидент ли «Эволют»
+    # Сначала приветствие, затем — проверка резидентства
+    await message.answer(get_message("welcome"))
     await message.answer(
         get_message("resident_check"),
         reply_markup=resident_check_kb(),
@@ -39,8 +40,8 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "resident:yes")
 async def cb_resident_yes(call: CallbackQuery, state: FSMContext) -> None:
-    """Резидент — показываем приветствие и кнопку «Подать заявку»."""
-    await call.message.answer(get_message("welcome"), reply_markup=start_kb())
+    """Резидент — даём возможность подать заявку."""
+    await call.message.answer(get_message("apply_invite"), reply_markup=start_kb())
     await call.answer()
 
 
