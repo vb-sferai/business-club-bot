@@ -1,18 +1,16 @@
 """
 Хранилище редактируемых текстов сообщений.
 
-Тексты лежат в messages.json в корне проекта. Если файла нет — будет создан
-с дефолтными текстами. Изменять тексты можно двумя способами:
-  1. Прямо в боте через админ-панель (кнопка "📝 Редактировать сообщения").
-  2. Вручную в messages.json — бот подхватит изменения при следующем чтении.
+Тексты лежат в таблице `kv` (ключ `messages`). При первом запуске бот
+заливает туда DEFAULT_MESSAGES. Редактировать можно из админ-панели
+(«📝 Редактировать сообщения») — изменения сохраняются в БД.
 
 Поддерживается HTML-разметка: <b>, <i>, <u>, <s>, <code>, <pre>, <a href="...">.
 """
 
-import json
-from pathlib import Path
+from database import kv_get, kv_set
 
-from config import MESSAGES_PATH
+KV_KEY = "messages"
 
 DEFAULT_MESSAGES: dict[str, str] = {
     "resident_check": (
@@ -74,14 +72,12 @@ DEFAULT_MESSAGES: dict[str, str] = {
 
 
 def load_messages() -> dict[str, str]:
-    """Читает messages.json, создаёт его при отсутствии. Дозаполняет недостающие ключи."""
-    path = Path(MESSAGES_PATH)
-    if not path.exists():
+    """Читает тексты из БД, при необходимости создаёт запись с дефолтами и
+    дозаполняет недостающие ключи."""
+    data = kv_get(KV_KEY)
+    if data is None:
         save_messages(DEFAULT_MESSAGES)
         return DEFAULT_MESSAGES.copy()
-    with path.open("r", encoding="utf-8") as f:
-        data = json.load(f)
-    # Добавляем ключи, которые могли появиться позже
     updated = False
     for key, value in DEFAULT_MESSAGES.items():
         if key not in data:
@@ -93,9 +89,8 @@ def load_messages() -> dict[str, str]:
 
 
 def save_messages(messages: dict[str, str]) -> None:
-    """Записывает словарь сообщений в messages.json."""
-    with open(MESSAGES_PATH, "w", encoding="utf-8") as f:
-        json.dump(messages, f, ensure_ascii=False, indent=2)
+    """Сохраняет все тексты в БД (kv-таблица)."""
+    kv_set(KV_KEY, messages)
 
 
 def get_message(key: str) -> str:
@@ -104,7 +99,7 @@ def get_message(key: str) -> str:
 
 
 def update_message(key: str, value: str) -> None:
-    """Обновляет один текст по ключу и сохраняет файл."""
+    """Обновляет один текст по ключу и сохраняет."""
     messages = load_messages()
     messages[key] = value
     save_messages(messages)

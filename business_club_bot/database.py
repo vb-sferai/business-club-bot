@@ -1,24 +1,27 @@
 """
-Слой работы с базой данных (SQLite).
+Слой работы с базой данных (PostgreSQL через psycopg 3).
 
 Таблицы:
   - users     — все пользователи бота, включая статус заявки;
-  - questions — вопросы, которые задают пользователи, и ответы админов.
+  - questions — вопросы, которые задают пользователи, и ответы админов;
+  - kv        — ключ/значение для редактируемых текстов сообщений.
 """
 
-import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, Iterator, Optional
 
-from config import DB_PATH
+import psycopg
+from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
+
+from config import DATABASE_URL
 
 
 @contextmanager
-def get_conn() -> Iterator[sqlite3.Connection]:
+def get_conn() -> Iterator[psycopg.Connection]:
     """Контекстный менеджер: возвращает соединение и автоматически коммитит."""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = psycopg.connect(DATABASE_URL, row_factory=dict_row)
     try:
         yield conn
         conn.commit()
@@ -32,7 +35,7 @@ def init_db() -> None:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
-                user_id        INTEGER PRIMARY KEY,
+                user_id        BIGINT PRIMARY KEY,
                 tg_username    TEXT,
                 full_name      TEXT,
                 phone          TEXT,
@@ -41,21 +44,21 @@ def init_db() -> None:
                 status         TEXT DEFAULT 'started',
                 applied_at     TIMESTAMP,
                 updated_at     TIMESTAMP,
-                is_banned      INTEGER DEFAULT 0
+                is_banned      BOOLEAN DEFAULT FALSE
             )
             """
         )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS questions (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id      INTEGER NOT NULL,
+                id           BIGSERIAL PRIMARY KEY,
+                user_id      BIGINT NOT NULL,
                 text         TEXT NOT NULL,
                 status       TEXT DEFAULT 'new',
                 answer_text  TEXT,
                 created_at   TIMESTAMP NOT NULL,
                 answered_at  TIMESTAMP,
-                answered_by  INTEGER
+                answered_by  BIGINT
             )
             """
         )
@@ -63,26 +66,34 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_questions_status "
             "ON questions(status, created_at DESC)"
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS kv (
+                key   TEXT PRIMARY KEY,
+                value JSONB NOT NULL
+            )
+            """
+        )
 
 
 # ---------- Пользователи ----------
 
 def ensure_user(user_id: int, tg_username: Optional[str]) -> None:
     """Создаёт запись при первом контакте, иначе обновляет ник Telegram."""
-    now = datetime.utcnow().isoformat(timespec="seconds")
+    now = datetime.utcnow()
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT user_id FROM users WHERE user_id = ?", (user_id,)
+            "SELECT user_id FROM users WHERE user_id = %s", (user_id,)
         ).fetchone()
         if row is None:
             conn.execute(
                 "INSERT INTO users (user_id, tg_username, status, updated_at) "
-                "VALUES (?, ?, 'started', ?)",
+                "VALUES (%s, %s, 'started', %s)",
                 (user_id, tg_username, now),
             )
         else:
             conn.execute(
-                "UPDATE users SET tg_username = ?, updated_at = ? WHERE user_id = ?",
+                "UPDATE users SET tg_username = %s, updated_at = %s WHERE user_id = %s",
                 (tg_username, now, user_id),
             )
 
@@ -90,7 +101,7 @@ def ensure_user(user_id: int, tg_username: Optional[str]) -> None:
 def get_user(user_id: int) -> Optional[dict[str, Any]]:
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT * FROM users WHERE user_id = ?", (user_id,)
+            "SELECT * FROM users WHERE user_id = %s", (user_id,)
         ).fetchone()
         return dict(row) if row else None
 
@@ -100,7 +111,7 @@ def find_user_by_username(username: str) -> Optional[dict[str, Any]]:
     username = username.lstrip("@")
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT * FROM users WHERE LOWER(tg_username) = LOWER(?)", (username,)
+            "SELECT * FROM users WHERE LOWER(tg_username) = LOWER(%s)", (username,)
         ).fetchone()
         return dict(row) if row else None
 
@@ -113,14 +124,14 @@ def save_application(
     comment: str,
 ) -> None:
     """Сохраняет заполненную анкету, переводит статус в 'pending'."""
-    now = datetime.utcnow().isoformat(timespec="seconds")
+    now = datetime.utcnow()
     with get_conn() as conn:
         conn.execute(
             """
             UPDATE users
-            SET full_name = ?, phone = ?, club_username = ?, comment = ?,
-                status = 'pending', applied_at = ?, updated_at = ?
-            WHERE user_id = ?
+            SET full_name = %s, phone = %s, club_username = %s, comment = %s,
+                status = 'pending', applied_at = %s, updated_at = %s
+            WHERE user_id = %s
             """,
             (full_name, phone, club_username, comment, now, now, user_id),
         )
@@ -131,7 +142,7 @@ def list_applications(status: Optional[str] = None) -> list[dict[str, Any]]:
     with get_conn() as conn:
         if status:
             rows = conn.execute(
-                "SELECT * FROM users WHERE status = ? "
+                "SELECT * FROM users WHERE status = %s "
                 "ORDER BY applied_at DESC",
                 (status,),
             ).fetchall()
@@ -145,10 +156,10 @@ def list_applications(status: Optional[str] = None) -> list[dict[str, Any]]:
 
 
 def set_status(user_id: int, status: str) -> None:
-    now = datetime.utcnow().isoformat(timespec="seconds")
+    now = datetime.utcnow()
     with get_conn() as conn:
         conn.execute(
-            "UPDATE users SET status = ?, updated_at = ? WHERE user_id = ?",
+            "UPDATE users SET status = %s, updated_at = %s WHERE user_id = %s",
             (status, now, user_id),
         )
 
@@ -157,7 +168,7 @@ def all_user_ids() -> list[int]:
     """ID всех пользователей бота, доступных для рассылки (не забаненных)."""
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT user_id FROM users WHERE is_banned = 0"
+            "SELECT user_id FROM users WHERE is_banned = FALSE"
         ).fetchall()
         return [r["user_id"] for r in rows]
 
@@ -166,20 +177,20 @@ def all_user_ids() -> list[int]:
 
 def save_question(user_id: int, text: str) -> int:
     """Сохраняет вопрос пользователя. Возвращает id записи."""
-    now = datetime.utcnow().isoformat(timespec="seconds")
+    now = datetime.utcnow()
     with get_conn() as conn:
-        cur = conn.execute(
+        row = conn.execute(
             "INSERT INTO questions (user_id, text, status, created_at) "
-            "VALUES (?, ?, 'new', ?)",
+            "VALUES (%s, %s, 'new', %s) RETURNING id",
             (user_id, text, now),
-        )
-        return cur.lastrowid
+        ).fetchone()
+        return row["id"]
 
 
 def get_question(question_id: int) -> Optional[dict[str, Any]]:
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT * FROM questions WHERE id = ?", (question_id,)
+            "SELECT * FROM questions WHERE id = %s", (question_id,)
         ).fetchone()
         return dict(row) if row else None
 
@@ -189,7 +200,7 @@ def list_questions(status: Optional[str] = None) -> list[dict[str, Any]]:
     with get_conn() as conn:
         if status:
             rows = conn.execute(
-                "SELECT * FROM questions WHERE status = ? "
+                "SELECT * FROM questions WHERE status = %s "
                 "ORDER BY created_at DESC",
                 (status,),
             ).fetchall()
@@ -212,21 +223,21 @@ def mark_question_answered(
     question_id: int, admin_id: int, answer_text: str
 ) -> None:
     """Сохраняет ответ админа на вопрос и переводит его в 'answered'."""
-    now = datetime.utcnow().isoformat(timespec="seconds")
+    now = datetime.utcnow()
     with get_conn() as conn:
         conn.execute(
-            "UPDATE questions SET status='answered', answered_at=?, "
-            "answered_by=?, answer_text=? WHERE id=?",
+            "UPDATE questions SET status='answered', answered_at=%s, "
+            "answered_by=%s, answer_text=%s WHERE id=%s",
             (now, admin_id, answer_text, question_id),
         )
 
 
 def mark_question_closed(question_id: int) -> None:
     """Закрыть вопрос без ответа."""
-    now = datetime.utcnow().isoformat(timespec="seconds")
+    now = datetime.utcnow()
     with get_conn() as conn:
         conn.execute(
-            "UPDATE questions SET status='closed', answered_at=? WHERE id=?",
+            "UPDATE questions SET status='closed', answered_at=%s WHERE id=%s",
             (now, question_id),
         )
 
@@ -258,3 +269,22 @@ def stats() -> dict[str, int]:
             "questions_answered": _count_questions("WHERE status='answered'"),
             "questions_closed": _count_questions("WHERE status='closed'"),
         }
+
+
+# ---------- Key/Value (тексты сообщений) ----------
+
+def kv_get(key: str) -> Optional[dict[str, Any]]:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT value FROM kv WHERE key = %s", (key,)
+        ).fetchone()
+        return row["value"] if row else None
+
+
+def kv_set(key: str, value: dict[str, Any]) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO kv (key, value) VALUES (%s, %s) "
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+            (key, Jsonb(value)),
+        )

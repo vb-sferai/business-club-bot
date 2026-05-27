@@ -24,6 +24,4 @@ ADMIN_IDS: list[int] = [
     int(x.strip()) for x in _raw_admins.split(",") if x.strip().isdigit()
 ]
 
-# Пути к файлам данных
-DB_PATH: str = str(BASE_DIR / "club.db")
-MESSAGES_PATH: str = str(BASE_DIR / "messages.json")
+DATABASE_URL: str = os.getenv("DATABASE_URL", "").strip()
